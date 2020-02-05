@@ -1,0 +1,389 @@
+#include <GCS_MAVLink.h>
+#include <SoftwareSerial.h>
+
+const byte rxPin = 7;
+const byte txPin = 8;
+
+// set up a new serial object
+SoftwareSerial mavlinkSerial (rxPin, txPin);
+
+const byte rxPin2 = 11;
+const byte txPin2 = 12;
+
+// set up a new serial object
+SoftwareSerial Serial_2 (rxPin2, txPin2);
+
+String input_s; c 9000
+float throttle_f = 1000;
+int throttle = 1000;
+int yaw = 1500;
+
+//Default values should be taken from RC drone remote controller  
+float pitch_default = 1500;
+float roll_default = 1423; 
+float pitch_f = pitch_default;
+float roll_f = roll_default;
+int pitch = pitch_default;
+int roll = roll_default;
+
+// Setting change values
+float change_thr = 1; 
+float change_roll = 0;
+float change_pitch = 0;
+
+bool is_armed = false;
+int del = 50;
+
+//Init control vars
+float error_height, error_x, error_y;
+String xs, ys, rs;
+float x_data, y_data, height, radius = 400;
+float coef_h = 1, sp_h = 1.5; // coefficients an setpoints
+float coef_x = 1, sp_x = 239; // +++-
+float coef_y = 1, sp_y = 239;
+int unavailable=0; //+++
+
+
+
+//#define mavlinkSerial  Serial2
+#define START    1
+#define MSG_RATE    10 // Hertz
+
+#define SYSID 255
+#define COMPID 1  //190 MissionPlanner
+#define TARSYS 1
+#define TARCOMP 0 //0 all
+#define LEDPIN 13
+
+// Message #0  HEARTHBEAT
+uint8_t  ap_type = 0, ap_autopilot = 0, ap_base_mode = 0, ap_system_status = 0, ap_mavlink_version = 0;
+uint32_t  ap_custom_mode = 0;
+
+// Message # 1  SYS_STATUS
+uint16_t  ap_voltage_battery = 0;  //mV
+int16_t  ap_current_battery = 0;  //dA
+
+// Message #24  GPS_RAW_INT
+uint8_t  ap_sat_visible = 0, ap_fixtype = 1;  //0= No GPS, 1 = No Fix, 2 = 2D Fix, 3 = 3D Fix
+int32_t  ap_latitude = 0, ap_longitude = 0, ap_gps_altitude = 0;
+
+// Message #74 VFR_HUD
+int32_t    ap_airspeed = 0;
+uint32_t  ap_groundspeed = 0, ap_heading = 0;
+uint16_t  ap_throttle = 0;
+int32_t    ap_bar_altitude = 0, ap_climb_rate = 0;
+
+// Message #27 RAW IMU
+int32_t   ap_accX = 0, ap_accY = 0, ap_accZ = 0;
+
+uint8_t     MavLink_Connected, buf[MAVLINK_MAX_PACKET_LEN];
+uint16_t  hb_count, len;
+unsigned long MavLink_Connected_timer, hb_timer, acc_timer, deb_timer;
+
+mavlink_message_t msg;
+
+
+void mavlink_setup()  //To run once during setup
+{
+  mavlinkSerial.begin(57600);
+  MavLink_Connected = 0;
+  MavLink_Connected_timer = millis();
+  hb_timer = millis();
+  acc_timer = millis();
+  hb_count = 0;
+
+  pinMode(LEDPIN, OUTPUT);
+}
+
+void hb_control()   //To run every loop
+{
+  if (millis() - hb_timer > 1500)
+  {
+    hb_timer = millis();
+    if (!MavLink_Connected) // Start requesting data streams from MavLink
+    {
+      digitalWrite(LEDPIN, HIGH);
+
+      mavlink_msg_request_data_stream_pack(SYSID, COMPID, &msg, TARSYS, TARCOMP, MAV_DATA_STREAM_EXTENDED_STATUS, MSG_RATE, START);
+      len = mavlink_msg_to_send_buffer(buf, &msg);
+      mavlinkSerial.write(buf, len);
+
+      delay(10);
+
+      mavlink_msg_request_data_stream_pack(SYSID, COMPID, &msg, TARSYS, TARCOMP, MAV_DATA_STREAM_EXTRA2, MSG_RATE, START);
+      len = mavlink_msg_to_send_buffer(buf, &msg);
+      mavlinkSerial.write(buf, len);
+
+      delay(10);
+
+      mavlink_msg_request_data_stream_pack(SYSID, COMPID, &msg, TARSYS, TARCOMP , MAV_DATA_STREAM_RAW_SENSORS, MSG_RATE, START);
+      len = mavlink_msg_to_send_buffer(buf, &msg);
+      mavlinkSerial.write(buf, len);
+
+      digitalWrite(LEDPIN, LOW);
+    }
+  }
+
+  if ((millis() - MavLink_Connected_timer) > 1500)
+  {
+    MavLink_Connected = 0;
+    hb_count = 0;
+  }
+}
+
+void mavlink_receive()  //to run when you want to receive updated informations
+{
+  mavlink_message_t msg;
+  mavlink_status_t status;
+
+  while (mavlinkSerial.available())
+  {
+    uint8_t c = mavlinkSerial.read();
+
+
+    if (mavlink_parse_char(MAVLINK_COMM_0, c, &msg, &status))
+    {
+      switch (msg.msgid)
+      {
+
+        case MAVLINK_MSG_ID_HEARTBEAT:  // 0
+          ap_base_mode = (mavlink_msg_heartbeat_get_base_mode(&msg) & 0x80) > 7;
+          ap_custom_mode = mavlink_msg_heartbeat_get_custom_mode(&msg);
+          MavLink_Connected_timer = millis();
+          if (!MavLink_Connected);
+          {
+            
+            hb_count++;
+            if ((hb_count++) > 10)
+            { // If  received > 10 heartbeats from MavLink then we are connected
+              MavLink_Connected = 1;
+              hb_count = 0;
+              digitalWrite(LEDPIN, HIGH);     // ledPin will be ON when connected to MavLink, else it will slowly blink
+            }
+          }
+          break;
+
+        case MAVLINK_MSG_ID_SYS_STATUS :   // 1
+          //ap_voltage_battery = Get_Volt_Average(mavlink_msg_sys_status_get_voltage_battery(&msg));  // 1 = 1mV
+          //ap_current_battery = Get_Current_Average(mavlink_msg_sys_status_get_current_battery(&msg));     // 1=10mA
+          break;
+
+        case MAVLINK_MSG_ID_GPS_RAW_INT:   // 24
+          ap_fixtype = mavlink_msg_gps_raw_int_get_fix_type(&msg);                               // 0 = No GPS, 1 =No Fix, 2 = 2D Fix, 3 = 3D Fix
+          ap_sat_visible =  mavlink_msg_gps_raw_int_get_satellites_visible(&msg);          // numbers of visible satelites
+          if (ap_fixtype == 3)
+          {
+            ap_latitude = mavlink_msg_gps_raw_int_get_lat(&msg);
+            ap_longitude = mavlink_msg_gps_raw_int_get_lon(&msg);
+            ap_gps_altitude = mavlink_msg_gps_raw_int_get_alt(&msg);    // 1m =1000
+          }
+          break;
+
+        case MAVLINK_MSG_ID_RAW_IMU:   // 27
+          ap_accX = mavlink_msg_raw_imu_get_xacc(&msg) / 10;                //
+          ap_accY = mavlink_msg_raw_imu_get_yacc(&msg) / 10;
+          ap_accZ = mavlink_msg_raw_imu_get_zacc(&msg) / 10;
+          // If you want to get accelerometer data from drone, you can print them
+          /*
+          Serial.print(ap_accX);
+          Serial.print("\t");
+          Serial.print(ap_accY);
+          Serial.print("\t");
+          Serial.print(ap_accZ);
+          Serial.print("\t");
+          Serial.println("\t");
+          */         
+          break; 
+
+        case MAVLINK_MSG_ID_VFR_HUD:   //  74
+          ap_airspeed = 0;
+          ap_groundspeed = mavlink_msg_vfr_hud_get_groundspeed(&msg);      // 100 = 1m/s
+          ap_heading = mavlink_msg_vfr_hud_get_heading(&msg);     // 100 = 100 deg
+          ap_throttle = mavlink_msg_vfr_hud_get_throttle(&msg);        //  100 = 100%
+          ap_bar_altitude = mavlink_msg_vfr_hud_get_alt(&msg) * 100;        //  m          
+          ap_climb_rate = mavlink_msg_vfr_hud_get_climb(&msg) * 100;      //  m/s
+//          Serial.print(ap_groundspeed);
+//          Serial.print("\t");
+//          Serial.print(ap_heading);
+//          Serial.print("\t");
+//          Serial.print(ap_throttle);
+//          Serial.print("\t");
+//          Serial.print(ap_bar_altitude);
+//          Serial.println("\t");
+//          Serial.print(ap_climb_rate);
+//          Serial.println("\t");
+//          delay(20);
+          break;
+
+        default:
+          break;
+      }
+    }
+  }
+}
+
+// Function for sending command to Arducopter
+void mavlink_send_cmd(uint16_t command, float p1, float p2, float p3, float p4, float p5, float p6, float p7)
+{
+  mavlink_msg_command_long_pack(SYSID, COMPID, &msg, TARSYS, TARCOMP, command, 0, p1, p2, p3, p4, p5, p6, p7);
+  len = mavlink_msg_to_send_buffer(buf, &msg);
+  mavlinkSerial.write(buf, len);
+}
+
+// Function for overriding RC controller 
+void mavlink_rc_send(float roll, float pitch, float yaw, float thrust, float modeCh)
+{
+  mavlink_msg_rc_channels_override_pack(SYSID, COMPID, &msg, TARSYS, TARCOMP, roll, pitch, thrust, yaw, modeCh, -1, -1, -1);
+  //mavlink_msg_manual_control_pack(SYSID, COMPID, &msg, TARSYS, roll, pitch, yaw, thrust, 1, 1, 1, 1);
+  //mavlink_msg_rc_channels_raw_pack(SYSID, COMPID, &msg, millis(), 1, 1500, 1500, 1500, 1500, 1500, 1500, 1500, 1500, 255);
+  len = mavlink_msg_to_send_buffer(buf, &msg);
+  mavlinkSerial.write(buf, len);
+}
+
+int mavlink_get_fixtype()
+{
+  return ap_fixtype;
+}
+
+// Functions for making commands simple
+void arm() {
+  mavlink_send_cmd(MAV_CMD_COMPONENT_ARM_DISARM, 1, 0, 0, 0, 0, 0, 0);
+  is_armed = true;    
+}
+
+void disarm() {
+  mavlink_send_cmd(MAV_CMD_COMPONENT_ARM_DISARM, 0, 0, 0, 0, 0, 0, 0);
+  is_armed = false;
+}
+
+void print_rc() {        
+        Serial_2.print(throttle);
+        Serial_2.print("\t");
+        Serial_2.print(yaw);
+        Serial_2.print("\t");
+        Serial_2.print(pitch);
+        Serial_2.print("\t");
+        Serial_2.print(roll);
+        Serial_2.println("\t");
+}
+
+void setup() {  
+  Serial.begin(9600);
+  Serial_2.begin(9600);
+  mavlink_setup();
+  //delay(1500);
+  hb_control();
+  //mavlink_receive();
+  
+  Serial_2.flush();
+  Serial_2.println("");
+  delay(10000);
+  arm(); 
+    
+    while(throttle_f<1400)
+    {
+      throttle_f++;
+      throttle = (int)throttle_f;
+      mavlink_rc_send(roll_default, pitch_default, yaw, throttle, 2000);
+      Serial_2.flush();
+      Serial_2.println("");
+      Serial_2.print(throttle);
+      delay(30);
+    }  
+}
+
+
+
+void loop() {
+  while(Serial.available())
+  {
+    unavailable=0;
+    input_s = Serial.readStringUntil('r');
+    int i=0;
+     
+    xs=input_s.substring(0,input_s.indexOf('x'));
+    ys=input_s.substring(input_s.indexOf('x')+1, input_s.indexOf('y'));
+    rs=input_s.substring(input_s.indexOf('y')+1, input_s.length());
+
+    x_data = xs.toInt();
+    y_data = ys.toInt();
+    radius = rs.toInt();
+    
+      height = 110/radius;
+      error_height = sp_h - height;
+      
+      if(error_height < 0)
+        coef_h = 0.25;
+      else
+        coef_h = 0.5;
+        
+      change_thr = error_height * coef_h; // 
+      change_thr = constrain(change_thr, -1, 2);
+      throttle_f = throttle_f + change_thr; // throttle_f is float of throttle +++  
+      
+      throttle_f = constrain(throttle_f, 1000, 1600);
+      throttle = (int)throttle_f;
+      mavlink_rc_send(roll, pitch, yaw, throttle, 2000);
+      delay(30);
+
+      error_x = sp_x - x_data;
+      coef_x = 0.2;     // 30/240 
+      change_roll = error_x * coef_x; //+++
+      change_roll = constrain(change_roll,-48,48);
+      roll_f = roll_default - change_roll; // roll_f is float of roll +++
+      roll = (int)roll_f;
+      mavlink_rc_send(roll, pitch, yaw, throttle, 2000);
+      delay(30);     
+      
+      
+      error_y = sp_y - y_data;
+      coef_y = 0.2;
+      change_pitch = error_y * coef_y; //+++ 
+      change_pitch = constrain(change_pitch,-48, 48);
+      pitch_f = pitch_default - change_pitch; // pitch_f is float of pitch +++
+      pitch = (int)pitch_f;
+      mavlink_rc_send(roll, pitch, yaw, throttle, 2000);
+      delay(30);
+      
+      Serial_2.flush();
+      Serial_2.println("");
+      Serial_2.print(throttle);
+      Serial_2.print(" ");
+      Serial_2.print(-change_pitch);
+      Serial_2.print(" ");
+      Serial_2.print(-change_roll);
+      Serial_2.print(" ");
+      Serial_2.print(height); 
+      Serial_2.print(" ");
+      Serial_2.print(change_thr);
+      
+  }
+  Serial_2.print("  Unav: ");
+  Serial_2.print(unavailable);
+  unavailable+=1; 
+   
+ 
+    if(throttle_f > 1000 && unavailable > 20)
+    {
+      roll = roll_default;
+      pitch = pitch_default;
+      if(throttle_f < 1300)
+      {        
+        throttle_f = throttle_f - 1;
+        delay(2);
+      }
+      else
+      {        
+        throttle_f = throttle_f - 0.5;
+        delay(40); // 
+      }
+      throttle = (int)throttle_f;      
+      mavlink_rc_send(roll, pitch, yaw, throttle, 2000);
+      Serial_2.flush();
+      Serial_2.println("");
+      Serial_2.print(throttle);      
+      Serial_2.print(" LANDDDD  ");
+      Serial_2.print(unavailable);      
+    }
+}
+
